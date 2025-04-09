@@ -1,0 +1,110 @@
+
+"""
+MicroPython Script - Receptor NRF24L01
+
+Escucha en un canal NRF24L01 específico, recibe datos
+(se esperan dos enteros: índice y valor RSSI), los imprime
+y los guarda en un archivo de texto.
+"""
+
+import struct
+import time
+from machine import Pin, SPI
+from nrf24l01 import NRF24L01
+
+# --- Constantes de Configuración ---
+
+# Hardware Pins
+NRF_SPI_ID = 0
+NRF_SCK_PIN = 2
+NRF_MOSI_PIN = 3
+NRF_MISO_PIN = 4
+NRF_CSN_PIN = 5
+NRF_CE_PIN = 6
+
+# NRF24L01 Configuration
+NRF_CHANNEL = 112
+NRF_RX_ADDRESS = b"\xe1\xf0\xf0\xf0\xf0" # Debe coincidir con la dirección TX del emisor
+NRF_PAYLOAD_SIZE = 8  # Bytes: Esperamos 2 enteros de 4 bytes (indice, rssi)
+
+# Application Settings
+OUTPUT_FILENAME = "RSSI_Recibido.txt"
+MAIN_LOOP_DELAY_S = 0.05 # Pequeña pausa en el bucle principal
+
+# --- Funciones ---
+
+def setup_nrf24l01_rx():
+    """Configura el módulo NRF24L01 para recepción."""
+    try:
+        spi = SPI(NRF_SPI_ID, sck=Pin(NRF_SCK_PIN), mosi=Pin(NRF_MOSI_PIN), miso=Pin(NRF_MISO_PIN))
+        csn = Pin(NRF_CSN_PIN, mode=Pin.OUT, value=1) # Ensure CSN is high initially
+        ce = Pin(NRF_CE_PIN, mode=Pin.OUT, value=0)   # Ensure CE is low initially
+        nrf = NRF24L01(spi, csn, ce, payload_size=NRF_PAYLOAD_SIZE)
+
+        nrf.set_channel(NRF_CHANNEL)
+        # Usar pipe 0 o 1 es común para la dirección principal
+        # El pipe 0 tiene la misma dirección base que TX por defecto si no se cambia
+        # Usar pipe 1 explícitamente es más claro para RX dedicado.
+        nrf.open_rx_pipe(1, NRF_RX_ADDRESS)
+        nrf.start_listening() # Poner en modo recepción
+
+        print(f"NRF24L01 configurado para RX en canal {NRF_CHANNEL}")
+        print(f"Escuchando en la dirección: {NRF_RX_ADDRESS} (Pipe 1)")
+        print(f"Esperando payloads de {NRF_PAYLOAD_SIZE} bytes...")
+        return nrf
+    except Exception as e:
+        print(f"❌ Error fatal al configurar NRF24L01: {e}")
+        raise # Re-lanzar para detener la ejecución
+
+# --- Loop Principal ---
+def main():
+    """Función principal del programa receptor."""
+    print("\n--- Receptor NRF24L01 - Inicializando ---")
+
+    # 1. Configurar NRF24L01
+    try:
+        nrf = setup_nrf24l01_rx()
+    except Exception:
+        print("Deteniendo ejecución por fallo de NRF24L01.")
+        return # Salir si NRF falla
+
+    print(f"\n--- Escuchando datos. Guardando en '{OUTPUT_FILENAME}' ---")
+
+    # 2. Abrir archivo para escritura (se sobreescribirá si ya existe)
+    try:
+        with open(OUTPUT_FILENAME, "w") as outfile:
+            while True:
+                # 3. Comprobar si hay datos disponibles
+                if nrf.any():
+                    payload = None # Resetear payload
+                    try:
+                        # 4. Recibir el payload
+                        payload = nrf.recv()
+
+                        # 5. Desempaquetar los datos (esperamos dos enteros 'ii')
+                        # 'i' representa un entero estándar (usualmente 4 bytes)
+                        idx, rssi = struct.unpack("ii", payload)
+
+                        # 6. Procesar datos recibidos
+                        print(f"Recibido -> ID: {idx}, RSSI: {rssi} (Payload: {payload.hex()})")
+
+                        # 7. Escribir en el archivo
+                        outfile.write(f"{idx},{rssi}\n")
+                        outfile.flush() # Asegurar que se escriba inmediatamente en el archivo
+
+                    except struct.error:
+                        print(f"❌ Error: Payload recibido no tiene el formato esperado (se esperaban {struct.calcsize('ii')} bytes). Payload (hex): {payload.hex() if payload else 'N/A'}")
+                    except Exception as e:
+                        print(f"❌ Error inesperado al procesar datos recibidos: {e}")
+                        # Podrías añadir lógica aquí si quieres reintentar o manejar errores específicos
+
+                # Pausa corta para evitar uso excesivo de CPU
+                time.sleep(MAIN_LOOP_DELAY_S)
+
+    except Exception as e:
+        # Error al abrir el archivo u otro error crítico fuera del bucle principal
+        print(f"❌ Error crítico: No se pudo abrir el archivo '{OUTPUT_FILENAME}' o ocurrió otro error grave: {e}")
+
+# --- Punto de Entrada ---
+if _name_ == "_main_":
+    main()
