@@ -26,8 +26,8 @@ NRF_CSN_PIN = 5
 NRF_CE_PIN = 6
 
 # WiFi Configuration
-WIFI_SSID = "Gaho00"
-WIFI_PASSWORD = "capitancp"
+WIFI_SSID = "Javier y Juan"
+WIFI_PASSWORD = "12345678"
 WIFI_CONNECT_TIMEOUT_S = 20 # Segundos máximos para intentar conectar
 
 # NRF24L01 Configuration
