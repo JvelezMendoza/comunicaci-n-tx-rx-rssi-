@@ -1,0 +1,220 @@
+
+"""
+MicroPython Script - Transmisor NRF24L01
+
+Mide el RSSI de la conexión WiFi al presionar un botón,
+guarda las mediciones en un archivo y luego transmite
+el contenido de ese archivo vía NRF24L01.
+"""
+
+import struct
+import time
+import math
+import network
+from machine import Pin, SPI
+from nrf24l01 import NRF24L01
+
+# --- Constantes de Configuración ---
+
+# Hardware Pins
+BOTON_PIN = 18
+NRF_SPI_ID = 0
+NRF_SCK_PIN = 2
+NRF_MOSI_PIN = 3
+NRF_MISO_PIN = 4
+NRF_CSN_PIN = 5
+NRF_CE_PIN = 6
+
+# WiFi Configuration
+WIFI_SSID = "Gaho00"
+WIFI_PASSWORD = "capitancp"
+WIFI_CONNECT_TIMEOUT_S = 20 # Segundos máximos para intentar conectar
+
+# NRF24L01 Configuration
+NRF_CHANNEL = 112
+NRF_TX_ADDRESS = b"\xe1\xf0\xf0\xf0\xf0"
+NRF_PAYLOAD_SIZE = 8  # Bytes: 2 enteros de 4 bytes (indice, rssi)
+
+# Application Settings
+RSSI_MEASUREMENT_COUNT = 10
+RSSI_MEASUREMENT_DELAY_S = 0.1
+RSSI_OUTPUT_FILENAME = "RSSI_Medicion.txt"
+NRF_SEND_DELAY_S = 0.1
+BUTTON_PRESS_DELAY_S = 2 # Delay after successful transmission
+
+# --- Inicialización de Hardware ---
+boton = Pin(BOTON_PIN, Pin.IN, Pin.PULL_UP)
+
+# --- Funciones ---
+
+def conectar_wifi(ssid, password, timeout_s):
+    """Intenta conectar a la red WiFi especificada."""
+    wifi = network.WLAN(network.STA_IF)
+    wifi.active(True)
+    print(f"Conectando a WiFi SSID: {ssid}...")
+    wifi.connect(ssid, password)
+
+    start_time = time.time()
+    while not wifi.isconnected() and (time.time() - start_time) < timeout_s:
+        print(f"Intento de conexión... (restante: {int(timeout_s - (time.time() - start_time))}s)")
+        time.sleep(1)
+
+    if wifi.isconnected():
+        print("✅ Conectado a WiFi")
+        print("   IP:", wifi.ifconfig()[0])
+        return wifi
+    else:
+        print(f"❌ No se pudo conectar a WiFi después de {timeout_s} segundos.")
+        wifi.active(False) # Desactivar si no se conectó
+        return None
+
+def setup_nrf24l01_tx():
+    """Configura el módulo NRF24L01 para transmisión."""
+    try:
+        spi = SPI(NRF_SPI_ID, sck=Pin(NRF_SCK_PIN), mosi=Pin(NRF_MOSI_PIN), miso=Pin(NRF_MISO_PIN))
+        csn = Pin(NRF_CSN_PIN, mode=Pin.OUT, value=1) # Ensure CSN is high initially
+        ce = Pin(NRF_CE_PIN, mode=Pin.OUT, value=0)   # Ensure CE is low initially
+        nrf = NRF24L01(spi, csn, ce, payload_size=NRF_PAYLOAD_SIZE)
+
+        nrf.set_channel(NRF_CHANNEL)
+        nrf.open_tx_pipe(NRF_TX_ADDRESS)
+        nrf.stop_listening() # Asegurarse de estar en modo TX
+
+        print(f"NRF24L01 configurado para TX en canal {NRF_CHANNEL}")
+        print(f"Dirección TX: {NRF_TX_ADDRESS}")
+        return nrf
+    except Exception as e:
+        print(f"❌ Error fatal al configurar NRF24L01: {e}")
+        # Aquí podrías querer reiniciar el micro o manejar el error de otra forma
+        raise # Re-lanzar la excepción para detener la ejecución si es crítico
+
+def medir_y_guardar_rssi(wifi_interface, count, delay_s, filename):
+    """Mide el RSSI múltiples veces, calcula estadísticas y guarda en archivo."""
+    if not wifi_interface or not wifi_interface.isconnected():
+        print("❌ No se puede medir RSSI: WiFi no conectado.")
+        return False
+
+    print(f"Iniciando {count} mediciones de RSSI...")
+    rssi_values = []
+    for i in range(count):
+        try:
+            rssi = wifi_interface.status('rssi')
+            print(f"  Medición {i+1}/{count}: RSSI = {rssi} dBm")
+            rssi_values.append(rssi)
+        except Exception as e:
+            print(f"  Error midiendo RSSI en intento {i+1}: {e}")
+            rssi_values.append(-100) # Valor por defecto en caso de error
+        time.sleep(delay_s)
+
+    if not rssi_values:
+        print("❌ No se pudieron obtener mediciones de RSSI.")
+        return False
+
+    # Calcular estadísticas (aunque no se transmiten, se imprimen como antes)
+    avg = sum(rssi_values) / len(rssi_values)
+    # Manejar caso de una sola medición para std dev
+    if len(rssi_values) > 1:
+        std = math.sqrt(sum((x - avg) ** 2 for x in rssi_values) / len(rssi_values))
+    else:
+        std = 0
+    print(f"Resultados RSSI -> Promedio: {avg:.2f} dBm, Desviación Estándar: {std:.2f} dBm")
+
+    # Guardar en archivo
+    try:
+        with open(filename, "w") as f:
+            for i, val in enumerate(rssi_values):
+                f.write(f"{i},{val}\n")
+        print(f"Mediciones guardadas en '{filename}'")
+        return True
+    except Exception as e:
+        print(f"❌ Error al guardar mediciones en archivo '{filename}': {e}")
+        return False
+
+def transmitir_archivo_nrf(nrf_instance, file_path, delay_s):
+    """Lee un archivo línea por línea y transmite los datos vía NRF24L01."""
+    print(f"Iniciando transmisión del archivo '{file_path}'...")
+    try:
+        with open(file_path, "r") as file:
+            line_count = 0
+            for line in file:
+                line = line.strip()
+                if not line: continue # Saltar líneas vacías
+
+                partes = line.split(",")
+                if len(partes) == 2:
+                    try:
+                        idx = int(partes[0])
+                        rssi = int(float(partes[1])) # Convertir a float primero por si acaso, luego a int
+                        payload = struct.pack("ii", idx, rssi) # Empaquetar como dos enteros
+
+                        print(f"  Enviando -> ID: {idx}, RSSI: {rssi} (Payload: {payload.hex()})")
+                        nrf_instance.send(payload)
+                        # Podrías añadir una comprobación de nrf.ack o similar si necesitas transmisión fiable
+                        time.sleep(delay_s)
+                        line_count += 1
+                    except ValueError:
+                        print(f"  Advertencia: Línea inválida ignorada: '{line}'")
+                    except Exception as send_err:
+                         print(f"  Error durante el envío NRF: {send_err}")
+                         time.sleep(0.5) # Pausa antes de reintentar la siguiente línea
+                else:
+                    print(f"  Advertencia: Formato de línea incorrecto ignorado: '{line}'")
+
+        print(f"✅ Transmisión finalizada. {line_count} líneas procesadas.")
+        return True
+
+    except OSError as e:
+        print(f"❌ Error: No se pudo abrir o leer el archivo '{file_path}'. ¿Se creó correctamente? ({e})")
+        return False
+    except Exception as e:
+        print(f"❌ Error inesperado durante la transmisión del archivo: {e}")
+        return False
+
+# --- Loop Principal ---
+def main():
+    """Función principal del programa transmisor."""
+    print("\n--- Transmisor NRF24L01 - Inicializando ---")
+
+    # 1. Conectar a WiFi
+    wifi = conectar_wifi(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_TIMEOUT_S)
+    # Si no hay WiFi, podríamos decidir continuar sin mediciones RSSI o detenernos.
+    # Por ahora, el código original mediría -100, así que mantenemos ese comportamiento.
+    # if not wifi:
+    #     print("Deteniendo ejecución por fallo de WiFi.")
+    #     return
+
+    # 2. Configurar NRF24L01
+    try:
+        nrf = setup_nrf24l01_tx()
+    except Exception:
+         # El error ya se imprimió en setup_nrf24l01_tx
+        print("Deteniendo ejecución por fallo de NRF24L01.")
+        return # Salir si NRF falla
+
+    print("\n--- Esperando pulsación del botón ---")
+
+    while True:
+        # 3. Esperar pulsación del botón (activo bajo)
+        if boton.value() == 0:
+            print("\n--- Botón presionado ---")
+
+            # 4. Medir y guardar RSSI
+            if medir_y_guardar_rssi(wifi, RSSI_MEASUREMENT_COUNT, RSSI_MEASUREMENT_DELAY_S, RSSI_OUTPUT_FILENAME):
+
+                # 5. Transmitir archivo por NRF
+                transmitir_archivo_nrf(nrf, RSSI_OUTPUT_FILENAME, NRF_SEND_DELAY_S)
+
+            else:
+                print("No se transmitirá archivo debido a error en medición/guardado.")
+
+            # Pequeña pausa para evitar rebotes / múltiples activaciones
+            print(f"--- Esperando {BUTTON_PRESS_DELAY_S}s antes de la siguiente detección ---")
+            time.sleep(BUTTON_PRESS_DELAY_S)
+            print("\n--- Esperando pulsación del botón ---")
+
+        # Pequeña pausa en el bucle principal para no consumir CPU innecesariamente
+        time.sleep(0.1)
+
+# --- Punto de Entrada ---
+if _name_ == "_main_":
+    main()
